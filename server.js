@@ -388,7 +388,7 @@ app.post('/api/requests/:id/reject', async (req, res) => {
             const resource = (reqDoc.category || 'general').toLowerCase();
             const rejectedIds = reqDoc.rejectionHistory.map(r => r.volunteer.toString());
 
-            let volunteers = await User.find({ role: 'volunteer', available: true, _id: { $nin: rejectedIds } }).lean();
+            let volunteers = await User.find({ role: 'volunteer', isVerified: true, available: true, _id: { $nin: rejectedIds } }).lean();
             if (volunteers.length > 0) {
                 // Find next best
                 const R = 6371;
@@ -449,7 +449,7 @@ app.get('/api/requests/:id/matches', async (req, res) => {
         if (!request) return res.status(404).json({ error: 'Not found' });
 
         const resource = (request.category || 'general').toLowerCase();
-        let volunteers = await User.find({ role: 'volunteer', available: true }).lean();
+        let volunteers = await User.find({ role: 'volunteer', isVerified: true, available: true }).lean();
 
         let usingGoogle = false;
 
@@ -577,7 +577,7 @@ app.post('/api/inventory', async (req, res) => {
 app.get('/api/volunteers', async (req, res) => {
     try {
         if (mongoose.connection.readyState === 1) {
-            const vols = await User.find({ role: 'volunteer', available: true }).lean();
+            const vols = await User.find({ role: 'volunteer', isVerified: true, available: true }).lean();
             return res.json(vols);
         }
         return res.json([

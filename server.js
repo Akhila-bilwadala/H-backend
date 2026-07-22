@@ -29,33 +29,138 @@ if (process.env.MONGO_URI) {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 // ─── AUTH ────────────────────────────────────────────────────────────────────
-app.post('/api/auth/login', async (req, res) => {
-    const { email, phone, role } = req.body;
-    let userRole = role === 'Admin' ? 'admin' : 'volunteer';
-    let userEmail = email || phone;
-
-    // Seed a mock volunteer so auto-assignment has a target
-    if (mongoose.connection.readyState === 1 && userRole === 'volunteer') {
-        const exists = await User.findOne({ email: userEmail });
-        if (!exists) {
-            await User.create({
-                name: 'Demo Volunteer',
-                email: userEmail,
-                phone: phone || '9876543210',
+app.post('/api/auth/register-volunteer', async (req, res) => {
+    try {
+        const { name, email, password, phone } = req.body;
+        if (!email || !phone || !password) {
+            return res.status(400).json({ success: false, error: 'Email, Phone, and Password are required.' });
+        }
+        if (mongoose.connection.readyState === 1) {
+            const query = { $or: [{ email }, { phone }] };
+            const existing = await User.findOne(query);
+            if (existing) {
+                return res.status(400).json({ success: false, error: 'User with this email or phone already exists.' });
+            }
+            const newVol = await User.create({
+                name,
+                email,
+                phone,
                 role: 'volunteer',
-                currentLocation: { lat: 9.5, lng: 76.3 },
-                available: true,
+                passwordHash: password, // Store password plaintext for demo
+                available: false,
+                isVerified: false,
+                currentLocation: { lat: 9.5, lng: 76.3 }, // Alappuzha
                 resources: ['medical', 'rescue', 'food', 'shelter']
             });
-            console.log('Seeded demo volunteer');
+            return res.json({ success: true, message: 'Registration submitted! Please wait for administration verification.', user: newVol });
         }
+        return res.json({ success: true, message: 'Mock registration complete' });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    const { email, password, role } = req.body;
+    let userRole = role === 'Admin' ? 'admin' : 'volunteer';
+    let userEmail = email;
+
+    if (userRole === 'admin') {
+        if (email === 'admin@relief.net' && password === 'password123') {
+            return res.json({
+                success: true,
+                token: 'MOCK_JWT_TOKEN',
+                user: { role: 'admin', email: userEmail, uid: 'admin_1' }
+            });
+        } else {
+            return res.status(401).json({ success: false, error: 'Invalid admin credentials' });
+        }
+    }
+
+    // Volunteer login checklist
+    if (mongoose.connection.readyState === 1) {
+        if (email === 'demo_volunteer@relief.net' && password === 'password123') {
+            let demoUser = await User.findOne({ email });
+            if (!demoUser) {
+                demoUser = await User.create({
+                    name: 'Demo Volunteer',
+                    email: 'demo_volunteer@relief.net',
+                    phone: '9876543210',
+                    role: 'volunteer',
+                    available: true,
+                    isVerified: true,
+                    currentLocation: { lat: 9.5, lng: 76.3 },
+                    resources: ['medical', 'rescue', 'food', 'shelter']
+                });
+            }
+            return res.json({
+                success: true,
+                token: 'MOCK_JWT_TOKEN',
+                user: { role: 'volunteer', email: demoUser.email, uid: demoUser._id }
+            });
+        }
+
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(401).json({ success: false, error: 'User not found. Please register first.' });
+        }
+        if (user.passwordHash !== password) {
+            return res.status(401).json({ success: false, error: 'Invalid email or password.' });
+        }
+        if (!user.isVerified) {
+            return res.status(403).json({ success: false, error: 'Account is pending administration verification.' });
+        }
+        return res.json({
+            success: true,
+            token: 'MOCK_JWT_TOKEN',
+            user: { role: 'volunteer', email: user.email, uid: user._id }
+        });
     }
 
     return res.json({
         success: true,
         token: 'MOCK_JWT_TOKEN',
-        user: { role: userRole, email: userEmail, uid: 'demo_volunteer_1' } // Provide consistent UID for demo mode
+        user: { role: 'volunteer', email: userEmail, uid: 'demo_volunteer_1' }
     });
+});
+
+// Volunteer list tools for Admin verification
+app.get('/api/volunteers/pending', async (req, res) => {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            const list = await User.find({ role: 'volunteer', isVerified: false }).lean();
+            return res.json(list);
+        }
+        return res.json([]);
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/volunteers/active', async (req, res) => {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            const list = await User.find({ role: 'volunteer', isVerified: true }).lean();
+            return res.json(list);
+        }
+        return res.json([]);
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+app.patch('/api/volunteers/:id/verify', async (req, res) => {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            const user = await User.findByIdAndUpdate(req.params.id, {
+                $set: { isVerified: true, available: true }
+            }, { new: true });
+            return res.json({ success: true, user });
+        }
+        return res.json({ success: true });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
 });
 
 // ─── REQUESTS ────────────────────────────────────────────────────────────────
@@ -165,7 +270,7 @@ Return ONLY a valid JSON object: { "isDuplicate": boolean, "duplicateOf": "<id o
             try {
                 if (!isDuplicateOf && location?.lat && location?.lng) {
                     const resource = (aiAnalysis.category || 'general').toLowerCase();
-                    const volunteers = await User.find({ role: 'volunteer', available: true }).lean();
+                    const volunteers = await User.find({ role: 'volunteer', isVerified: true, available: true }).lean();
                     if (volunteers.length > 0) {
                         const R = 6371; // km
                         const scoredVols = volunteers.map(v => {

@@ -29,12 +29,32 @@ if (process.env.MONGO_URI) {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 // ─── AUTH ────────────────────────────────────────────────────────────────────
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
     const { email, phone, role } = req.body;
+    let userRole = role === 'Admin' ? 'admin' : 'volunteer';
+    let userEmail = email || phone;
+
+    // Seed a mock volunteer so auto-assignment has a target
+    if (mongoose.connection.readyState === 1 && userRole === 'volunteer') {
+        const exists = await User.findOne({ email: userEmail });
+        if (!exists) {
+            await User.create({
+                name: 'Demo Volunteer',
+                email: userEmail,
+                phone: phone || '9876543210',
+                role: 'volunteer',
+                currentLocation: { lat: 9.5, lng: 76.3 },
+                available: true,
+                resources: ['medical', 'rescue', 'food', 'shelter']
+            });
+            console.log('Seeded demo volunteer');
+        }
+    }
+
     return res.json({
         success: true,
         token: 'MOCK_JWT_TOKEN',
-        user: { role, email: email || phone }
+        user: { role: userRole, email: userEmail, uid: 'demo_volunteer_1' } // Provide consistent UID for demo mode
     });
 });
 
@@ -140,6 +160,41 @@ Return ONLY a valid JSON object: { "isDuplicate": boolean, "duplicateOf": "<id o
 
         if (mongoose.connection.readyState === 1) {
             await doc.save();
+
+            // AUTO-ASSIGNMENT LOGIC (Nearest Volunteer)
+            try {
+                if (!isDuplicateOf && location?.lat && location?.lng) {
+                    const resource = (aiAnalysis.category || 'general').toLowerCase();
+                    const volunteers = await User.find({ role: 'volunteer', available: true }).lean();
+                    if (volunteers.length > 0) {
+                        const R = 6371; // km
+                        const scoredVols = volunteers.map(v => {
+                            let dist = 999;
+                            if (v.currentLocation?.lat) {
+                                const dLat = (location.lat - v.currentLocation.lat) * Math.PI / 180;
+                                const dLon = (location.lng - v.currentLocation.lng) * Math.PI / 180;
+                                const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(v.currentLocation.lat * Math.PI / 180) * Math.cos(location.lat * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+                                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                                dist = R * c;
+                            }
+                            const hasRes = v.resources?.some(r => r.toLowerCase().includes(resource));
+                            const score = (dist * 0.6) - (hasRes ? 40 : 0);
+                            return { ...v, dist, matchScore: score };
+                        }).sort((a, b) => a.matchScore - b.matchScore);
+
+                        const bestMatch = scoredVols[0];
+                        if (bestMatch && bestMatch.dist < 50) { // arbitrary 50km radius limit
+                            doc.status = 'assigned';
+                            doc.assignedVolunteer = bestMatch._id;
+                            doc.statusHistory.push({ status: 'assigned', at: new Date() });
+                            await doc.save();
+                            console.log(`Auto-assigned to volunteer ${bestMatch.email || bestMatch.phone}`);
+                        }
+                    }
+                }
+            } catch (autoErr) {
+                console.error('Auto-assignment failed:', autoErr.message);
+            }
         }
 
         return res.json({ success: true, message: 'Request submitted', request: doc });
@@ -258,6 +313,23 @@ app.post('/api/requests/:id/reject', async (req, res) => {
             return res.json({ success: true, request: reqDoc });
         }
         return res.json({ success: true, message: 'Mock reject OK' });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// GET /api/volunteers/tasks/:email  — volunteer fetches their assigned works
+app.get('/api/volunteers/tasks/:email', async (req, res) => {
+    try {
+        if (mongoose.connection.readyState === 1) {
+            // Find user by email
+            const vOpt = await User.findOne({ email: req.params.email, role: 'volunteer' }).lean();
+            if (vOpt) {
+                const myTasks = await Request.find({ assignedVolunteer: vOpt._id }).sort({ createdAt: -1 }).lean();
+                return res.json(myTasks);
+            }
+        }
+        return res.json([]);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }

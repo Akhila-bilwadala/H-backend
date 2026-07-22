@@ -10,6 +10,7 @@ const userSchema = new mongoose.Schema({
     resources: [{ type: String }],
     currentLocation: { lat: Number, lng: Number },
     available: { type: Boolean, default: false },
+    isVerified: { type: Boolean, default: false },
     tasksCompleted: { type: Number, default: 0 },
 }, { timestamps: true });
 

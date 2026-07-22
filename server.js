@@ -4,7 +4,6 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 
 const Request = require('./models/Request');
-const Volunteer = require('./models/Volunteer');
 const Inventory = require('./models/Inventory');
 const Shelter = require('./models/Shelter');
 const User = require('./models/User');
@@ -401,7 +400,7 @@ app.post('/api/inventory', async (req, res) => {
 app.get('/api/volunteers', async (req, res) => {
     try {
         if (mongoose.connection.readyState === 1) {
-            const vols = await Volunteer.find({ available: true }).lean();
+            const vols = await User.find({ role: 'volunteer', available: true }).lean();
             return res.json(vols);
         }
         return res.json([
